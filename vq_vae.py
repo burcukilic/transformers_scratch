@@ -130,7 +130,7 @@ class LinearVectorQuantizedVAE(nn.Module):
 
 
 class ConvolutionalVectorQuantizedVAE(nn.Module):
-    def __init__(self, in_channels=1, latent_dim=4, codebook_size=10):
+    def __init__(self, in_channels=1, latent_dim=4, codebook_size=512):
         super().__init__()
 
         self.bottleneck_dim = latent_dim
@@ -288,9 +288,8 @@ def show_reconstructions(model, test_loader, device='cuda'):
     with torch.no_grad():
         x, _ = next(iter(test_loader))
         x = x.to(device)
-        _, quantized_latents, decoded, _, _ = model(x)
-        print(quantized_latents)
-
+        _, _, decoded, _, _ = model(x)
+        
         x = x.cpu()
         decoded = decoded.cpu()
 
