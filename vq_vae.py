@@ -288,8 +288,8 @@ def show_reconstructions(model, test_loader, device='cuda'):
     with torch.no_grad():
         x, _ = next(iter(test_loader))
         x = x.to(device)
-        _, _, decoded, _, _ = model(x)
-        
+        _, z, decoded, _, _ = model(x)
+        print(z)
         x = x.cpu()
         decoded = decoded.cpu()
 
@@ -315,6 +315,10 @@ model = ConvolutionalVectorQuantizedVAE()
 
 train_vqvae(model, train_loader, val_loader, epochs=10, lr=1e-3, device=device)
 show_reconstructions(model, test_loader, device=device)
+
+# save the model
+torch.save(model.state_dict(), 'vq_vae_mnist.pth')
+
 
 
 '''
