@@ -58,7 +58,7 @@ class TransformerDecoder(nn.Module):
             x = block(x, encoder_output=encoder_output, mask=mask)
 
         x = self.fc(x)
-        x = self.act(x)
+        #x = self.act(x)
 
         return x
     
@@ -73,23 +73,26 @@ class DecisionTransformerDecoder(nn.Module):
         
         super().__init__()
         self.reward_emb = nn.Linear(1, embed_dim)
+        self.state_emb = nn.Linear(2, embed_dim)
         self.token_emb = nn.Embedding(vocab_size, embed_dim) # (batch_size, seq_len) -> (batch_size, seq_len, embed_dim)
-        self.pos_emb = SinusoidalPositionalEncoding(d_model=embed_dim, max_len=seq_len) 
+        self.pos_emb = SinusoidalPositionalEncoding(d_model=3*embed_dim, max_len=seq_len) 
+        self.ln = nn.LayerNorm(3 * embed_dim)
         self.blocks = nn.ModuleList([
-            TransformerDecoderBlock(embed_dim=2*embed_dim)
+            TransformerDecoderBlock(embed_dim=3*embed_dim)
             for _ in range(num_blocks)
         ])
 
-        self.fc = nn.Linear(2*embed_dim, vocab_size)
+        self.fc = nn.Linear(3*embed_dim, vocab_size)
         self.act = nn.Softmax(dim=-1)
 
-    def forward(self, x: torch.Tensor, r: torch.Tensor, encoder_output: torch.Tensor = None, mask: torch.Tensor = None):
-        x = self.token_emb(x)
-        x = self.pos_emb(x)
-
-        r = self.reward_emb(r.unsqueeze(-1))
-        x = torch.cat([x, r], dim=-1)  # Concatenate reward embedding
-        
+    def forward(self, x: torch.Tensor, r: torch.Tensor, s: torch.Tensor, encoder_output: torch.Tensor = None, mask: torch.Tensor = None):
+        x_token = self.token_emb(x)          # (B, T, D)
+        r_emb = self.reward_emb(r.unsqueeze(-1))  # (B, T, D)
+        s_emb = self.state_emb(s)            # (B, T, D)
+        x = torch.cat([x_token, r_emb, s_emb], dim=-1)  # (B, T, 3D)
+        x = self.ln(x)  # LayerNorm over the concatenated embeddings
+        x = self.pos_emb(x)  # positional encoding over full input
+                
         for block in self.blocks:
             x = block(x, encoder_output=encoder_output, mask=mask)
 
@@ -98,8 +101,8 @@ class DecisionTransformerDecoder(nn.Module):
 
         return x
     
-    def loss(self, x: torch.Tensor, r: torch.Tensor, target: torch.Tensor):
-        y = self.forward(x, r)
+    def loss(self, x: torch.Tensor, r: torch.Tensor, s: torch.Tensor, target: torch.Tensor):
+        y = self.forward(x, r, s)
         y = y.view(-1, y.size(-1))
         target = target.view(-1)
         return F.cross_entropy(y, target)
