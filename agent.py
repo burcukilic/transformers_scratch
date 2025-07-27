@@ -5,7 +5,8 @@ import torch.nn.functional as F
 import torch.optim as optim
 from transformer_decoder import DecisionTransformerDecoder
 import random
-
+from collections import deque
+import numpy as np
 class SimpleEnv():
     def __init__(self, max_steps=100):
         pygame.init()
@@ -15,6 +16,7 @@ class SimpleEnv():
         self.running = True
         self.agent_size = 20
         self.max_steps = max_steps
+        self.action_space = np.array([1, 2, 3, 4])
         self.reset()
 
     def reset(self):
@@ -73,6 +75,114 @@ class SimpleEnv():
     def close(self):
         pygame.quit()
 
+class ReplayBuffer:
+    def __init__(self, capacity=10000, max_seq_len=100):
+        self.capacity = capacity
+        self.max_seq_len = max_seq_len
+        self.buffer = deque(maxlen=capacity)
+
+    def add_episode(self, states, actions, rewards):
+        episode = {
+            "states": np.array(states[-self.max_seq_len:]),
+            "actions": np.array(actions[-self.max_seq_len:]),
+            "rewards": np.array(rewards[-self.max_seq_len:])
+        }
+        self.buffer.append(episode)
+
+    def sample(self, batch_size=32):
+        batch = random.sample(self.buffer, min(len(self.buffer), batch_size))
+        return batch
+
+    def __len__(self):
+        return len(self.buffer)
+
+class DecisionTransformerAgent:
+    def __init__(self, env, model, replay_buffer, device="cpu", max_seq_len=100):
+        self.env = env
+        self.model = model
+        self.replay_buffer = replay_buffer
+        self.device = device
+        self.max_seq_len = max_seq_len
+
+    def run_episode(self, epsilon=0.1, max_steps=100):
+        self.model.eval()
+        state = self.env.reset()
+        done = False
+
+        states, actions, rewards = [], [], []
+
+        for t in range(max_steps):
+            #state_norm = np.array(state, dtype=np.float32) / np.array([self.env.observation_space.high])  # normalize if needed
+            state_norm = np.array(state, dtype=np.float32)  # No normalization in this simple case
+            states.append(state_norm)
+
+            # Prepare inputs
+            s_seq = torch.tensor(states, dtype=torch.float32).unsqueeze(0).to(self.device)  # (1, T, 2)
+            r_seq = torch.tensor(rewards, dtype=torch.float32).unsqueeze(0).to(self.device)  # (1, T)
+            a_seq = torch.tensor(actions, dtype=torch.long).unsqueeze(0).to(self.device) if actions else torch.zeros((1, 0), dtype=torch.long).to(self.device)
+
+            # Pad to fixed length
+            pad_len = self.max_seq_len - s_seq.size(1)
+            if pad_len > 0:
+                s_seq = F.pad(s_seq, (0, 0, 0, pad_len))
+                r_seq = F.pad(r_seq, (0, pad_len))
+                a_seq = F.pad(a_seq, (0, pad_len))
+
+            # Decide next action
+            if len(actions) < 1 or random.random() < epsilon:
+                action = np.random.choice(self.env.action_space)
+            else:
+                with torch.no_grad():
+                    
+                    # Pad action, reward, and state to predict next step
+                    a_seq_input = F.pad(a_seq, (0, 1), value=0)
+                    r_seq_input = F.pad(r_seq, (0, 1), value=65.0)
+                    s_seq_input = F.pad(s_seq, (0, 0, 0, 1), value=0)  # Use last state for padding
+
+                    s_seq_input = s_seq_input[:, :a_seq_input.shape[1], :]
+                    r_seq_input = r_seq_input[:, :a_seq_input.shape[1]]
+
+                    logits = self.model(a_seq_input, r_seq_input, s_seq_input)
+                    probs = logits[0, a_seq.size(1)]  # Use prediction for next action
+                    action = torch.argmax(probs).item()
+
+            # Environment step
+            next_state, reward, done = self.env.step(action)
+
+            actions.append(action)
+            rewards.append(reward)
+            state = next_state
+
+            if done:
+                break
+
+        self.replay_buffer.add_episode(states, actions, rewards)
+
+    def train_step(self, batch_size=16):
+        self.model.train()
+        if len(self.replay_buffer) < batch_size:
+            return  # not enough data yet
+
+        batch = self.replay_buffer.sample(batch_size)
+        
+        losses = []
+        for episode in batch:
+            actions = torch.tensor(episode["actions"], dtype=torch.long).unsqueeze(0)  # (1, T)
+            rewards = torch.tensor(episode["rewards"], dtype=torch.float32).unsqueeze(0)  # (1, T)
+            states = torch.tensor(episode["states"], dtype=torch.float32).unsqueeze(0)  # (1, T, 2)
+
+            # Inputs for predicting next action
+            a_in = F.pad(actions[:, :-1], (0, 1), value=0)  # (1, T)
+            r_in = F.pad(rewards[:, :-1], (0, 1), value=0.0)
+            s_in = F.pad(states[:, :-1, :], (0, 0, 0, 1), value=0.0)
+
+            # Targets: true next action
+            target = actions  # Predict full sequence (shifted)
+
+            loss = self.model.loss(a_in.to(self.device), r_in.to(self.device), s_in.to(self.device), target.to(self.device))
+            losses.append(loss)
+
+        return torch.stack(losses).mean()
 
 if __name__ == "__main__":
     env = SimpleEnv()
@@ -83,74 +193,26 @@ if __name__ == "__main__":
 
     epsilon = 1.0          # start with full exploration
     epsilon_min = 0.05
-    epsilon_decay = 0.999  # decay per episode
+    epsilon_decay = 0.99  # decay per episode
 
-    rewards, actions, states = [], [], []
+    replay_buffer = ReplayBuffer(capacity=10000, max_seq_len=100)
+    agent = DecisionTransformerAgent(env, model, replay_buffer)
 
-    while env.running:
-        if env.done or len(actions) >= 100:
-            # Learning step after episode ends
-            if len(actions) > 1:
-                seq_len = 100
-                
-                # Prepare input and target
-                input_actions = torch.tensor(actions[:-1])
-                target_actions = torch.tensor(actions[1:])
-                
-                input_states = torch.tensor(states[:-1])
-                reward_seq = torch.tensor(rewards[:-1])
-                
-                # Pad
-                input_actions = F.pad(input_actions, (0, seq_len - input_actions.size(0)), value=0)
-                target_actions = F.pad(target_actions, (0, seq_len - target_actions.size(0)), value=0)
-                input_states = F.pad(input_states, (0, 0, 0, seq_len - input_states.size(0)), value=0.0)
-                reward_seq = F.pad(reward_seq, (0, seq_len - reward_seq.size(0)), value=0.0)
-                
-                # Train step
-                input_actions = input_actions.unsqueeze(0).long()       # (1, seq_len)
-                target_actions = target_actions.unsqueeze(0).long()     # (1, seq_len)
-                reward_seq = reward_seq.unsqueeze(0).float()            # (1, seq_len)
-                input_states = input_states.unsqueeze(0).float()        # (1, seq_len, 2)
-                
-                output = model(input_actions, reward_seq, input_states)
-                loss = model.loss(input_actions, reward_seq, input_states, target_actions)
-                loss.backward()
-                optimizer.step()
-                optimizer.zero_grad()
+    num_episodes = 1000
+    for episode in range(num_episodes):
+        agent.run_episode(epsilon=epsilon)
+        
+        epsilon = max(epsilon_min, epsilon * epsilon_decay)  # decay epsilon
 
-                print(f"Episode done | Loss: {loss.item():.4f} | Epsilon: {epsilon:.3f} | Rewards: {sum(rewards):.2f}")
+        loss = agent.train_step(batch_size=16)
+        if loss is not None:
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
 
-            # Reset
-            rewards, actions, states = [], [], []
-            obs = env.reset()
-            epsilon = max(epsilon_min, epsilon * epsilon_decay)
+        ep_reward = sum(replay_buffer.buffer[-1]['rewards'])
+        print(f"Episode {episode + 1}/{num_episodes} completed | epsilon: {epsilon:.2f} | reward: {ep_reward:.2f} | loss: {loss.item() if loss else 'N/A'}")
 
-        # ================== Decide Next Action ==================
-        if len(actions) < 1 or random.random() < epsilon:
-            action = random.choice([1, 2, 3, 4])  # explore
-        else:
-            # Use model prediction
-            with torch.no_grad():
-                r_seq = torch.tensor(rewards).unsqueeze(0).float()
-                
-                r_seq = torch.cat([r_seq, torch.tensor([[40.0]])], dim=1)
-                r_seq = r_seq / 40
-                s_seq = torch.tensor(states).unsqueeze(0).float()
-                s_seq = torch.cat([s_seq, torch.tensor([[[obs[0], obs[1]]]])], dim=1)  # add current state
-                a_seq = torch.tensor(actions).unsqueeze(0).long()
 
-                # Pad
-                r_seq = F.pad(r_seq, (0, 100 - r_seq.size(1)))
-                a_seq = F.pad(a_seq, (0, 100 - a_seq.size(1)))
-                s_seq = F.pad(s_seq, (0, 0, 0, 100 - s_seq.size(1)), value=0.0)
-                logits = model(a_seq, r_seq, s_seq)  # (1, seq, vocab)
-                next_logits = logits[0, len(actions)]  # next timestep
-                action = torch.argmax(next_logits).item()  # exploit
-                
-        # ================ Step the environment ==================
-        obs, reward, done = env.step(action)
-        rewards.append(reward)
-        actions.append(action)
-        states.append(obs)
 
     env.close()
