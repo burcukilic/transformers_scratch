@@ -17,7 +17,7 @@ class EncoderClassifier(nn.Module):
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor = None):
         x = self.encoder(x, mask=mask)
-        x = x.mean(dim=1)  # Global average pooling
+        x = x.mean(dim=1)
         x = self.classifier(x)
 
         return x
@@ -440,4 +440,7 @@ def test_encoder_decoder_translation():
     print("Predicted: ", " ".join(translated))
 
 
-test_encoder_decoder_translation()
+if __name__ == "__main__":
+    test_transformer_encoder()
+    #test_encoder_decoder()
+    #test_encoder_decoder_translation()

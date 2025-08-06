@@ -12,12 +12,11 @@ class SinusoidalPositionalEncoding(nn.Module):
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)  # (max_len, 1)
         div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
 
-        # Apply sine to even indices, cosine to odd
         pe[:, 0::2] = torch.sin(position * div_term)  # Even: sin(pos / 10000^{2i/d_model})
         pe[:, 1::2] = torch.cos(position * div_term)  # Odd:  cos(pos / 10000^{2i/d_model})
 
-        pe = pe.unsqueeze(0)  # Shape: (1, max_len, d_model), ready to broadcast over batch
-        self.register_buffer('pe', pe)  # buffer = non-trainable but moves with model.to(device)
+        pe = pe.unsqueeze(0)
+        self.register_buffer('pe', pe)
 
     def forward(self, x: torch.Tensor):
 
@@ -79,9 +78,7 @@ class MultiHeadAttentionLayer(nn.Module):
             scores = scores.masked_fill(mask == 0, float('-inf'))
 
         attn = F.softmax(scores, dim=-1)
-        out = attn @ v  # (B, num_heads, T, head_dim)
-
-        # Merge heads: (B, T, embed_dim)
+        out = attn @ v
         out = out.transpose(1, 2).contiguous().view(batch_size, q_len, self.embed_dim)
 
         return self.out_proj(out)

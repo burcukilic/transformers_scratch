@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
 from blocks import *
 
 class TransformerDecoderBlock(nn.Module):
@@ -68,44 +67,6 @@ class TransformerDecoder(nn.Module):
         target = target.view(-1)
         return F.cross_entropy(y, target)
 
-class DecisionTransformerDecoder(nn.Module):
-    def __init__(self, vocab_size: int = 10, embed_dim: int = 2, seq_len: int = 10, num_blocks: int = 2):
-        
-        super().__init__()
-        self.reward_emb = nn.Linear(1, embed_dim)
-        self.state_emb = nn.Linear(2, embed_dim)
-        self.token_emb = nn.Embedding(vocab_size, embed_dim) # (batch_size, seq_len) -> (batch_size, seq_len, embed_dim)
-        self.pos_emb = SinusoidalPositionalEncoding(d_model=3*embed_dim, max_len=seq_len) 
-        self.ln = nn.LayerNorm(3 * embed_dim)
-        self.blocks = nn.ModuleList([
-            TransformerDecoderBlock(embed_dim=3*embed_dim)
-            for _ in range(num_blocks)
-        ])
-
-        self.fc = nn.Linear(3*embed_dim, vocab_size)
-        self.act = nn.Softmax(dim=-1)
-
-    def forward(self, x: torch.Tensor, r: torch.Tensor, s: torch.Tensor, encoder_output: torch.Tensor = None, mask: torch.Tensor = None):
-        x_token = self.token_emb(x)          # (B, T, D)
-        r_emb = self.reward_emb(r.unsqueeze(-1))  # (B, T, D)
-        s_emb = self.state_emb(s)            # (B, T, D)
-        x = torch.cat([x_token, r_emb, s_emb], dim=-1)  # (B, T, 3D)
-        x = self.ln(x)  # LayerNorm over the concatenated embeddings
-        x = self.pos_emb(x)  # positional encoding over full input
-                
-        for block in self.blocks:
-            x = block(x, encoder_output=encoder_output, mask=mask)
-
-        x = self.fc(x)
-        x = self.act(x)
-
-        return x
-    
-    def loss(self, x: torch.Tensor, r: torch.Tensor, s: torch.Tensor, target: torch.Tensor):
-        y = self.forward(x, r, s)
-        y = y.view(-1, y.size(-1))
-        target = target.view(-1)
-        return F.cross_entropy(y, target)
     
 
 class TransformerSeq2Seq(nn.Module):
